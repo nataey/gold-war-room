@@ -1,130 +1,161 @@
 import streamlit as st
-import pandas as pd
 import requests
-import io
-import yfinance as yf
-import plotly.graph_objects as go
-from datetime import datetime
+import json
+import pandas as pd
+from newsapi import NewsApiClient
+from datetime import datetime, timedelta
+import re
+import os
 
-# --- ตั้งค่าหน้าเว็บให้กว้างและใส่ Icon หัวเว็บ ---
-st.set_page_config(page_title="Gold War Room Pro", page_icon="🏆", layout="wide")
+# --- ตั้งค่าหน้าเว็บตามสไตล์ท่าน ---
+st.set_page_config(page_title="Gold AI Specialist v2.5", page_icon="💰", layout="wide")
 
-# ================= 1. ส่วนดึงข้อมูล (Backend) =================
-def get_market_data():
-    # ดึงย้อนหลัง 2 วันเพื่อคำนวณว่า "บวก" หรือ "ลบ" จากเมื่อวาน
-    tickers = ['GC=F', 'CL=F', 'DX-Y.NYB']
-    data = yf.download(tickers, period="2d", interval="15m", progress=False)
+st.title("💰 Gold Market Intelligence Agent")
+st.caption("ยุทธศาสตร์วิเคราะห์ข่าวกรอง (ฉบับเสถียรสูง: บันทึกข้อมูลเข้า War Room)")
+
+# ==============================================================================
+# 🔴 ส่วนดึงรหัสจาก Secrets (ดึงจาก .streamlit/secrets.toml)
+# ==============================================================================
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    NEWS_API_KEY = st.secrets["NEWS_API_KEY"]
+except:
+    st.error("❌ ไม่พบ API Key! กรุณาตั้งค่าใน .streamlit/secrets.toml")
+    st.stop()
+
+# Path สำหรับบันทึกข้อมูล
+OUTPUT_FILE = "data/news_intelligence.csv"
+if not os.path.exists("data"): os.makedirs("data")
+
+# ==============================================================================
+# ฟังก์ชันการทำงาน (คงโครงสร้างเดิมของท่าน แต่เพิ่มเกราะป้องกัน)
+# ==============================================================================
+
+def find_best_model():
+    # บังคับใช้ 1.5-flash เพื่อความเสถียรตามโค้ดเดิมท่าน
+    return "models/gemini-1.5-flash"
+
+def get_detailed_analysis(model_name, news_list):
+    clean_model_name = model_name.replace("models/", "")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model_name}:generateContent?key={GEMINI_API_KEY}"
+    headers = {'Content-Type': 'application/json'}
     
-    market_info = {}
+    news_input = ""
+    for i, n in enumerate(news_list):
+        news_input += f"ข่าวที่ {i+1} [เวลา: {n['publishedAt']}]: {n['title']} - {n.get('description', '')}\n\n"
+
+    prompt = f"""
+    ในฐานะนักกลยุทธ์ทองคำ วิเคราะห์ข่าวต่อไปนี้ โดยเน้นนโยบาย Trump (Tariff/Greenland)
+    และตอบในรูปแบบ JSON ภาษาไทยเท่านั้น:
+    {news_input}
+    
+    รูปแบบที่ต้องการ:
+    {{
+        "individual_news": [
+            {{
+                "title": "หัวข้อข่าวภาษาไทย",
+                "summary": "สรุปเนื้อหาสำคัญสั้นๆ",
+                "weight": "คะแนนผลกระทบต่อทอง (0-100)"
+            }}
+        ],
+        "overall_sentiment_score": "คะแนนเฉลี่ยภาพรวม",
+        "overall_summary": "สรุปสภาวะตลาด",
+        "action_plan": "คำแนะนำการลงทุน"
+    }}
+    """
+    
+    # 🛡️ นี่คือ "เกราะ" ที่เพิ่มเข้าไปเพื่อให้รันในเครื่องผ่านเหมือนบน Cloud
+    data = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}
+        ]
+    }
+    
     try:
-        # ดึงราคาล่าสุด
-        gold_now = data['Close']['GC=F'].iloc[-1]
-        oil_now = data['Close']['CL=F'].iloc[-1]
-        dxy_now = data['Close']['DX-Y.NYB'].iloc[-1]
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 200:
+            return response.json()['candidates'][0]['content']['parts'][0]['text']
+        return None
+    except:
+        return None
+
+def clean_json_text(text):
+    if not text: return None
+    text = re.sub(r'```json\s*', '', text)
+    text = re.sub(r'```', '', text)
+    return text.strip()
+
+# ==============================================================================
+# ส่วนแสดงผล Dashboard
+# ==============================================================================
+
+if st.button("🚀 เริ่มการวิเคราะห์เชิงลึก (Sync Mode)", type="primary"):
+    with st.spinner('📡 กำลังดึงข่าวกรองและบันทึกฐานข้อมูล...'):
+        newsapi = NewsApiClient(api_key=NEWS_API_KEY)
         
-        # ดึงราคาปิดวันก่อน (เพื่อหา Delta)
-        # (ใช้วิธีง่ายๆ คือเอาตัวแรกของช่วงเวลามาเทียบ)
-        gold_open = data['Open']['GC=F'].iloc[0]
-        oil_open = data['Open']['CL=F'].iloc[0]
-        dxy_open = data['Open']['DX-Y.NYB'].iloc[0]
+        keywords = ["Gold Price impact Trump", "Trump tariff", "US Federal Reserve"]
+        query_text = " OR ".join([f'"{k}"' for k in keywords])
+        
+        all_articles = newsapi.get_everything(
+            q=query_text,
+            from_param=(datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d'),
+            language='en',
+            sort_by='publishedAt',
+            page_size=7 # ลดจำนวนข่าวลงนิดเพื่อความเร็วและแม่นยำ
+        )
+        articles = all_articles.get('articles', [])
 
-        market_info = {
-            'Gold': {'price': gold_now, 'change': gold_now - gold_open},
-            'Oil': {'price': oil_now, 'change': oil_now - oil_open},
-            'DXY': {'price': dxy_now, 'change': dxy_now - dxy_open}
-        }
-    except:
-        # กันเหนียวเผื่อ Error
-        market_info = {
-            'Gold': {'price': 0, 'change': 0},
-            'Oil': {'price': 0, 'change': 0},
-            'DXY': {'price': 0, 'change': 0}
-        }
-    return market_info, data
+        if articles:
+            best_model = find_best_model()
+            raw_res = get_detailed_analysis(best_model, articles)
+            
+            if raw_res:
+                try:
+                    analysis = json.loads(clean_json_text(raw_res))
+                    
+                    # --- แสดงผลหน้าเว็บ (สไตล์เดิมที่ท่านชอบ) ---
+                    st.divider()
+                    col_a, col_b = st.columns([1, 2])
+                    with col_a:
+                        st.metric("Overall Score", f"{analysis.get('overall_sentiment_score')}/100")
+                    with col_b:
+                        st.info(f"**วิเคราะห์ภาพรวม:** {analysis.get('overall_summary')}")
+                        st.success(f"**กลยุทธ์แนะนำ:** {analysis.get('action_plan')}")
 
-def get_forex_data():
-    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        response = requests.get(url, headers=headers)
-        df = pd.read_xml(io.BytesIO(response.content))
-        if 'actual' not in df.columns: df['actual'] = ""
-        df = df[(df['country'] == 'USD') & (df['impact'] == 'High')]
-        return df
-    except:
-        return pd.DataFrame()
+                    # --- 💾 ส่วนบันทึกลง CSV (หัวใจของ Agent 001) ---
+                    rows = []
+                    for news in analysis.get('individual_news', []):
+                        rows.append({
+                            "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "Title": news.get('title'),
+                            "Summary": news.get('summary'),
+                            "Weight": news.get('weight'),
+                            "Overall_Score": analysis.get('overall_sentiment_score')
+                        })
+                    pd.DataFrame(rows).to_csv(OUTPUT_FILE, index=False, encoding='utf-8-sig')
+                    st.toast("✅ บันทึกข้อมูลเข้า War Room แล้ว")
 
-def analyze_news(title, forecast):
-    title_lower = title.lower()
-    if "cpi" in title_lower:
-        return "🏷️ ดัชนีเงินเฟ้อ (CPI)", "🔥 ถ้าสูงกว่าคาด -> ทองร่วง"
-    elif "ppi" in title_lower:
-        return "🏭 ดัชนีผู้ผลิต (PPI)", "⚠️ ถ้าสูง -> ต้นทุนพุ่ง -> ทองกดดัน"
-    elif "employment" in title_lower or "non-farm" in title_lower:
-        return "👷 การจ้างงาน (Non-Farm)", "🚀 ถ้าจ้างงานแย่ -> ทองพุ่ง!"
-    elif "fed" in title_lower:
-        return "🏦 ดอกเบี้ย FED", "💀 ข่าวใหญ่: ระวังความผันผวนสูง"
-    else:
-        return f"📰 {title}", "👀 รอติดตามตัวเลขจริง"
+                    st.subheader("📰 รายงานการวิเคราะห์รายข่าว")
+                    for news in analysis.get('individual_news', []):
+                        with st.container(border=True):
+                            c1, c2 = st.columns([4, 1])
+                            with c1:
+                                st.write(f"**{news.get('title')}**")
+                                st.write(news.get('summary'))
+                            with c2:
+                                weight = int(news.get('weight', 50))
+                                st.subheader(f"{weight}")
 
-# ================= 2. ส่วนแสดงผล (Frontend) =================
-
-# --- A. Sidebar (เมนูด้านข้าง) ---
-with st.sidebar:
-    st.title("🏆 Gold War Room")
-    st.caption("System: Online ✅")
-    st.markdown("---")
-    st.info("👋 สวัสดีครับ! นี่คือระบบวิเคราะห์ทองคำส่วนตัวของคุณ")
-    st.markdown("**Last Update:**")
-    st.text(datetime.now().strftime("%H:%M:%S"))
-    
-# --- B. ส่วนหัว (Metrics) ---
-st.markdown("### 🌍 ภาพรวมตลาด Real-time")
-prices, chart_data = get_market_data()
-
-m1, m2, m3 = st.columns(3)
-with m1:
-    st.metric("🥇 ทองคำ (Gold)", f"${prices['Gold']['price']:.2f}", f"{prices['Gold']['change']:.2f}")
-with m2:
-    st.metric("🛢️ น้ำมัน (WTI)", f"${prices['Oil']['price']:.2f}", f"{prices['Oil']['change']:.2f}")
-with m3:
-    st.metric("💵 ดอลลาร์ (DXY)", f"{prices['DXY']['price']:.2f}", f"{prices['DXY']['change']:.2f}")
-
-st.markdown("---")
-
-# --- C. ส่วนเนื้อหา (Tabs) ---
-tab1, tab2 = st.tabs(["📊 กราฟเทคนิค", "🤖 ข่าว & บทวิเคราะห์"])
-
-with tab1: # แท็บที่ 1: กราฟ
-    st.subheader("📈 กราฟราคาทองคำ (15 นาที)")
-    if 'Close' in chart_data:
-        gold_vals = chart_data['Close']['GC=F']
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=gold_vals.index, y=gold_vals.values, 
-                                 mode='lines', name='Gold', 
-                                 line=dict(color='#FFD700', width=2),
-                                 fill='tozeroy')) # ถมสีใต้กราฟให้ดูแพง
-        fig.update_layout(height=400, template="plotly_dark", margin=dict(l=0, r=0, t=30, b=0))
-        st.plotly_chart(fig, use_container_width=True)
-
-with tab2: # แท็บที่ 2: ข่าว
-    st.subheader("📅 ปฏิทินเศรษฐกิจ & AI Logic")
-    col_news_1, col_news_2 = st.columns([1.5, 1])
-    
-    df_news = get_forex_data()
-    
-    with col_news_1:
-        st.caption("ตารางข่าว Forex Factory (เฉพาะข่าวแดง)")
-        if not df_news.empty:
-            st.dataframe(df_news[['date', 'time', 'title', 'forecast']], use_container_width=True)
+                except Exception as e:
+                    st.error(f"การถอดรหัสข้อมูลผิดพลาด: {e}")
         else:
-            st.info("วันนี้ไม่มีข่าวแดงครับ นอนหลับสบายใจได้ 💤")
+            st.warning("ไม่พบข่าวใหม่")
 
-    with col_news_2:
-        st.caption("💡 บทวิเคราะห์อัตโนมัติ")
-        if not df_news.empty:
-            for index, row in df_news.iterrows():
-                thai_title, analysis = analyze_news(row['title'], row['forecast'])
-                with st.expander(f"{thai_title}"):
-                    st.write(f"**คำแนะนำ:** {analysis}")
-                    st.write(f"**คาดการณ์:** {row['forecast']}")
+if os.path.exists(OUTPUT_FILE):
+    if st.checkbox("📁 ตรวจสอบไฟล์ CSV ในเครื่อง"):
+        st.dataframe(pd.read_csv(OUTPUT_FILE))
+
