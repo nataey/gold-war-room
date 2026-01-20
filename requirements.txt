@@ -1,6 +1,5 @@
 streamlit
-pandas
 requests
-lxml
-yfinance
-plotly
+pandas
+newsapi-python
+st-gsheets-connection
